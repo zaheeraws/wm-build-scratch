@@ -1,0 +1,132 @@
+# Microsoft Store (MSIX) build, run on a real Windows runner.
+#
+# This repo holds no source. It exists only to borrow free Actions minutes:
+# public repos are unmetered, and the Store build has to run on Windows
+# because makeappx.exe ships in the Windows SDK and the native modules here
+# (uiohook-napi, @miniben90/x-win) resolve their win32 binaries only there.
+#
+# The source is cloned at job time from the private repo with SOURCE_PAT and
+# lives only on the ephemeral runner. Nothing is committed here but this file.
+#
+# Adapted from workmentor-desktop's own .github/workflows/build-windows.yml —
+# the node-gyp, .env and CI=false workarounds below are all carried over from
+# it, and any fix made there should be mirrored here.
+
+name: Build MSIX
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'workmentor-desktop branch/tag/SHA to build'
+        required: true
+        default: '0.1.11'
+        type: string
+      identity_name:
+        description: 'Partner Center Package/Identity/Name (blank = package.json placeholder)'
+        required: false
+        type: string
+      publisher:
+        description: 'Partner Center Package/Identity/Publisher, e.g. CN=ABCD-1234-... (blank = placeholder)'
+        required: false
+        type: string
+      publisher_display_name:
+        description: 'Partner Center Publisher display name (blank = placeholder)'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # The private source. Never committed to this repo; the runner VM is
+      # destroyed when the job ends.
+      - name: Checkout workmentor-desktop
+        uses: actions/checkout@v4
+        with:
+          repository: CyberNestLtd/workmentor-desktop
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.SOURCE_PAT }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          # 22, not 20: the current node-gyp needed below bundles an undici
+          # that requires Node 22+ (webidl.util.markAsUncloneable).
+          node-version: 22
+          cache: yarn
+
+      # .env is gitignored and carries GOOGLE_MAPS_API_KEY. The build config
+      # copies it via extraResources, so it must exist or electron-builder
+      # fails. main.js tolerates it being empty (the dotenv load is wrapped in
+      # try/catch) — location lookups degrade, everything else works.
+      - name: Create placeholder .env
+        shell: bash
+        run: touch .env
+
+      # The node-gyp bundled with npm crashes detecting Visual Studio on
+      # current windows runners (ERR_CHILD_PROCESS_STDIO_MAXBUFFER — VS is
+      # present, the finder just cannot parse its output), which fails the
+      # native builds for @bugsnag/plugin-electron-client-state-persistence
+      # and uiohook-napi.
+      - name: Use an up-to-date node-gyp
+        shell: bash
+        run: |
+          npm install -g node-gyp@latest
+          echo "npm_config_node_gyp=$(npm prefix -g)/node_modules/node-gyp/bin/node-gyp.js" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        shell: bash
+        run: yarn install --frozen-lockfile --network-timeout 600000
+
+      # Run the renderer build explicitly rather than `npm run build`: that
+      # script uses POSIX env-prefix and $(date) syntax, which cmd.exe cannot
+      # parse on Windows.
+      - name: Build renderer
+        shell: bash
+        env:
+          # Actions sets CI=true, which makes react-scripts treat lint warnings
+          # as errors. This tree has pre-existing warnings unrelated to
+          # packaging, and `npm run build` does not set CI locally — so match
+          # local behaviour rather than fail the build on lint debt.
+          CI: 'false'
+        run: |
+          export REACT_APP_VERSION=$(node -p "require('./package.json').version")
+          export REACT_APP_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%MZ)
+          npx react-scripts build
+          cp preload.js build/
+
+      # The real Partner Center identity is passed in at dispatch time rather
+      # than committed, so it never lands in this public repo. Left blank, the
+      # package.json placeholders are used — enough to prove the pipeline, but
+      # NOT submittable to the Store.
+      - name: Package MSIX
+        shell: bash
+        env:
+          IDENTITY_NAME: ${{ inputs.identity_name }}
+          PUBLISHER: ${{ inputs.publisher }}
+          PUBLISHER_DISPLAY_NAME: ${{ inputs.publisher_display_name }}
+        run: |
+          args=()
+          if [ -n "$IDENTITY_NAME" ]; then
+            args+=("-c.appx.identityName=$IDENTITY_NAME")
+          fi
+          if [ -n "$PUBLISHER" ]; then
+            args+=("-c.appx.publisher=$PUBLISHER")
+          fi
+          if [ -n "$PUBLISHER_DISPLAY_NAME" ]; then
+            args+=("-c.appx.publisherDisplayName=$PUBLISHER_DISPLAY_NAME")
+          fi
+          npx electron-builder --win appx --x64 --publish never "${args[@]}"
+
+      - name: Show what was built
+        shell: bash
+        run: ls -la dist/
+
+      - name: Upload MSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: workmentor-msix
+          if-no-files-found: error
+          path: dist/*.appx
