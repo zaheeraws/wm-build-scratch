@@ -21,6 +21,10 @@ on:
         required: true
         default: '0.1.11'
         type: string
+      version:
+        description: 'Version to stamp into package.json (e.g. 0.1.12). Blank = as committed.'
+        required: false
+        type: string
       windows_updates:
         description: 'Build with WINDOWS_UPDATES_ENABLED true (the NSIS build self-updates; the Store MSIX must not)'
         required: true
@@ -74,6 +78,15 @@ jobs:
         run: |
           sed -i 's/WINDOWS_UPDATES_ENABLED: false,/WINDOWS_UPDATES_ENABLED: true,/' constants.js
           grep -q 'WINDOWS_UPDATES_ENABLED: true,' constants.js
+
+      # Lets a release be cut before the bump is pushed to the source repo, so
+      # every platform ships the same version the updater compares against.
+      - name: Set version
+        if: inputs.version != ''
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
 
       # The node-gyp bundled with npm crashes detecting Visual Studio on
       # current windows runners (ERR_CHILD_PROCESS_STDIO_MAXBUFFER — VS is
