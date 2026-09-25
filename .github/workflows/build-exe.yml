@@ -1,0 +1,123 @@
+# Windows NSIS (.exe) build for the GitHub auto-update feed, run on a real
+# Windows runner.
+#
+# Same arrangement as build-msix.yml: no source lives here, it is cloned at job
+# time from the private repo with SOURCE_PAT onto an ephemeral runner. This repo
+# is public, so its run logs and artifacts are public too — download the
+# artifact and delete the run (gh run delete) as soon as it finishes. The
+# artifact also expires after a day on its own.
+#
+# Produces the installer, its blockmap and latest.yml. All three must be
+# uploaded to the release: latest.yml is what electron-updater reads, and the
+# installer alone gives a release that looks fine and updates nothing.
+
+name: Build EXE
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'workmentor-desktop branch/tag/SHA to build'
+        required: true
+        default: '0.1.11'
+        type: string
+      windows_updates:
+        description: 'Build with WINDOWS_UPDATES_ENABLED true (the NSIS build self-updates; the Store MSIX must not)'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # The private source. Never committed to this repo; the runner VM is
+      # destroyed when the job ends.
+      - name: Checkout workmentor-desktop
+        uses: actions/checkout@v4
+        with:
+          repository: CyberNestLtd/workmentor-desktop
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.SOURCE_PAT }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          # 22, not 20: the current node-gyp needed below bundles an undici
+          # that requires Node 22+ (webidl.util.markAsUncloneable).
+          node-version: 22
+          cache: yarn
+
+      # .env is gitignored and carries GOOGLE_MAPS_API_KEY; the build config
+      # copies it via extraResources, so it must exist. Filled from the
+      # GOOGLE_MAPS_API_KEY secret when one is set, empty otherwise (main.js
+      # tolerates that — location lookups degrade, everything else works).
+      # Never echoed: the value only goes to the file.
+      - name: Create .env
+        shell: bash
+        env:
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+        run: |
+          if [ -n "$GOOGLE_MAPS_API_KEY" ]; then
+            printf 'GOOGLE_MAPS_API_KEY=%s\n' "$GOOGLE_MAPS_API_KEY" > .env
+          else
+            touch .env
+          fi
+
+      # v0.1.8 NSIS installs predate the opt-in switch and self-update today.
+      # Shipping this build with the committed `false` would update them once
+      # and then strand them, so the flag is flipped for this build only.
+      - name: Enable Windows auto-update
+        if: inputs.windows_updates
+        shell: bash
+        run: |
+          sed -i 's/WINDOWS_UPDATES_ENABLED: false,/WINDOWS_UPDATES_ENABLED: true,/' constants.js
+          grep -q 'WINDOWS_UPDATES_ENABLED: true,' constants.js
+
+      # The node-gyp bundled with npm crashes detecting Visual Studio on
+      # current windows runners (ERR_CHILD_PROCESS_STDIO_MAXBUFFER — VS is
+      # present, the finder just cannot parse its output), which fails the
+      # native builds for @bugsnag/plugin-electron-client-state-persistence
+      # and uiohook-napi.
+      - name: Use an up-to-date node-gyp
+        shell: bash
+        run: |
+          npm install -g node-gyp@latest
+          echo "npm_config_node_gyp=$(npm prefix -g)/node_modules/node-gyp/bin/node-gyp.js" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        shell: bash
+        run: yarn install --frozen-lockfile --network-timeout 600000
+
+      # Run the renderer build explicitly rather than `npm run build`: that
+      # script uses POSIX env-prefix and $(date) syntax, which cmd.exe cannot
+      # parse on Windows.
+      - name: Build renderer
+        shell: bash
+        env:
+          # Actions sets CI=true, which makes react-scripts treat lint warnings
+          # as errors. This tree has pre-existing warnings unrelated to
+          # packaging, and `npm run build` does not set CI locally — so match
+          # local behaviour rather than fail the build on lint debt.
+          CI: 'false'
+        run: |
+          export REACT_APP_VERSION=$(node -p "require('./package.json').version")
+          export REACT_APP_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%MZ)
+          npx react-scripts build
+          cp preload.js build/
+
+      - name: Package installer
+        shell: bash
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: workmentor-exe
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/latest.yml
