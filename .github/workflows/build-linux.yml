@@ -1,0 +1,90 @@
+# Linux x64 build (AppImage + deb + tar.gz) for the GitHub auto-update feed,
+# run on a real Ubuntu runner so native modules (uiohook-napi, @miniben90/x-win)
+# resolve their linux binaries instead of the macOS ones a cross-build ships.
+#
+# Same arrangement as build-exe.yml: no source lives here, it is cloned at job
+# time from the private repo with SOURCE_PAT. This repo is public, so download
+# the artifact and delete the run (gh run delete) as soon as it finishes.
+#
+# latest-linux.yml is what electron-updater reads; only the AppImage self-updates.
+
+name: Build Linux
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'workmentor-desktop branch/tag/SHA to build'
+        required: true
+        type: string
+      version:
+        description: 'Version to stamp into package.json (e.g. 0.1.14). Blank = as committed.'
+        required: false
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout workmentor-desktop
+        uses: actions/checkout@v4
+        with:
+          repository: CyberNestLtd/workmentor-desktop
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.SOURCE_PAT }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+
+      # Headers uiohook-napi / x-win need if they fall back to a source build.
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libx11-dev libxtst-dev libxt-dev libxkbfile-dev libxrandr-dev libxcb1-dev
+
+      - name: Create .env
+        env:
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+        run: |
+          if [ -n "$GOOGLE_MAPS_API_KEY" ]; then
+            printf 'GOOGLE_MAPS_API_KEY=%s\n' "$GOOGLE_MAPS_API_KEY" > .env
+          else
+            touch .env
+          fi
+
+      - name: Set version
+        if: inputs.version != ''
+        env:
+          VERSION: ${{ inputs.version }}
+        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile --network-timeout 600000
+
+      - name: Build renderer
+        env:
+          CI: 'false'
+        run: |
+          export REACT_APP_VERSION=$(node -p "require('./package.json').version")
+          export REACT_APP_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%MZ)
+          npx react-scripts build
+          cp preload.js build/
+
+      - name: Package
+        run: npx electron-builder --linux --x64 --publish never
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: workmentor-linux
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.tar.gz
+            dist/latest-linux.yml
