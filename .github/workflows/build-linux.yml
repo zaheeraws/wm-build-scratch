@@ -66,7 +66,7 @@ jobs:
       # redefines once_flag / call_once, which current glibc already provides via
       # <threads.h>, so its native build fails on ubuntu-latest. Install without
       # scripts, neutralise those two defines in the runner's copy, then run the
-      # normal install so every native module builds.
+      # npm rebuild (re-running install scripts without re-extracting) so every native module builds.
       - name: Install dependencies
         run: |
           yarn install --frozen-lockfile --ignore-scripts --network-timeout 600000
@@ -74,7 +74,7 @@ jobs:
           sed -i -e 's/^  #define once_flag pthread_once_t$/  \/\* once_flag provided by glibc \*\//' \
                  -e 's/^  #define call_once(flag,func) pthread_once(flag,func)$/  \/\* call_once provided by glibc \*\//' "$H"
           grep -n "provided by glibc" "$H"
-          yarn install --frozen-lockfile --network-timeout 600000
+          npm rebuild
 
       - name: Build renderer
         env:
