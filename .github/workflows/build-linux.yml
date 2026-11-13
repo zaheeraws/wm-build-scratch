@@ -62,7 +62,12 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: npm version "$VERSION" --no-git-tag-version --allow-same-version
 
+      # tinycthread in @bugsnag/plugin-electron-client-state-persistence clashes
+      # with glibc's pthread_once_t under the default C11 mode; gnu99 avoids it.
       - name: Install dependencies
+        env:
+          CFLAGS: -std=gnu99
+          CXXFLAGS: -std=gnu++17
         run: yarn install --frozen-lockfile --network-timeout 600000
 
       - name: Build renderer
