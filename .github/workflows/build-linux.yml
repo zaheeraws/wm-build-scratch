@@ -79,6 +79,8 @@ jobs:
       - name: Build renderer
         env:
           CI: 'false'
+          # .map files would ship the readable renderer source inside the AppImage.
+          GENERATE_SOURCEMAP: 'false'
         run: |
           export REACT_APP_VERSION=$(node -p "require('./package.json').version")
           export REACT_APP_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%MZ)
